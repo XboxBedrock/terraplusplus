@@ -14,6 +14,8 @@ import java.net.URL;
 import java.net.URLConnection;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
@@ -21,6 +23,262 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+
+//BEGIN PROTOCODE
+
+import org.locationtech.jts.geom.Coordinate;
+import org.locationtech.jts.geom.Geometry;
+import org.locationtech.jts.geom.GeometryFactory;
+import org.locationtech.jts.geom.LineString;
+import org.locationtech.jts.geom.MultiPolygon;
+
+import de.topobyte.adt.geo.BBox;
+import de.topobyte.osm4j.core.access.OsmInputException;
+import de.topobyte.osm4j.core.access.OsmReader;
+import de.topobyte.osm4j.core.dataset.InMemoryMapDataSet;
+import de.topobyte.osm4j.core.dataset.MapDataSetLoader;
+import de.topobyte.osm4j.core.model.iface.OsmRelation;
+import de.topobyte.osm4j.core.model.iface.OsmWay;
+import de.topobyte.osm4j.core.model.util.OsmModelUtil;
+import de.topobyte.osm4j.core.resolve.EntityFinder;
+import de.topobyte.osm4j.core.resolve.EntityFinders;
+import de.topobyte.osm4j.core.resolve.EntityNotFoundException;
+import de.topobyte.osm4j.core.resolve.EntityNotFoundStrategy;
+import de.topobyte.osm4j.geometry.RegionBuilder;
+import de.topobyte.osm4j.geometry.RegionBuilderResult;
+import de.topobyte.osm4j.geometry.WayBuilder;
+import de.topobyte.osm4j.geometry.WayBuilderResult;
+import de.topobyte.osm4j.xml.dynsax.OsmXmlReader;
+
+
+public class OsmData
+{
+
+    //Query examples:
+    //Check water at 41.2, -87.6: boolean isWater = pointWithinPolygons(water, -87.6, 41.2);
+
+    public OsmData() { //TODO: constructor
+
+    }
+        // This is the region we would like to render
+        BBox bbox = new BBox(13.45546, 52.51229, 13.46642, 52.50761); //TODO: region download and cache
+
+        // Define a query to retrieve some data
+        String queryTemplate = "http://overpass-api.de/api/interpreter?data=(node(%f,%f,%f,%f);<;>;);out;";
+        String query = String.format(queryTemplate, bbox.getLat2(),
+                bbox.getLon1(), bbox.getLat1(), bbox.getLon2());
+
+        // Open a stream
+        InputStream input;
+
+    {
+        try {
+            input = new URL(query).openStream();
+        } catch (IOException e) {
+            e.printStackTrace(); //TODO: log errors
+        }
+    }
+
+    // Create a reader and read all data into a data set
+        OsmReader reader = new OsmXmlReader(input, false);
+        InMemoryMapDataSet data;
+
+    {
+        try {
+            data = MapDataSetLoader.read(reader, true, true,
+                            true);
+        } catch (OsmInputException e) {
+            e.printStackTrace();
+        }
+    }
+    // The data set will be used as entity provider when building geometries
+
+    //TODO: call buildData() in region cache code
+    //buildData();
+
+    // This is a set of values for the 'highway' key of ways that we will render
+    // as streets
+    /*
+    private Set<String> validHighways = new HashSet<>(
+            Arrays.asList("primary", "secondary", "tertiary",
+                    "residential", "living_street"));
+
+    */
+
+
+    // We build the geometries to be rendered during construction and store them
+    // in these fields so that we don't have to recompute everything when
+    // rendering.
+    private List<Geometry> buildings = new ArrayList<>();
+    private List<Geometry> water = new ArrayList<>();
+    private List<LineString> streets = new ArrayList<>();
+    private Map<LineString, String> names = new HashMap<>();
+
+    private void buildData()
+    {
+        // We create building geometries from relations and ways. Ways that are
+        // part of multipolygon buildings may be tagged as buildings themselves,
+        // however rendering them independently will fill the polygon holes they
+        // are cutting out of the relations. Hence we store the ways found in
+        // building relations to skip them later on when working on the ways.
+        Set<OsmWay> buildingRelationWays = new HashSet<>();
+        // We use this to find all way members of relations.
+        EntityFinder wayFinder = EntityFinders.create(data,
+                EntityNotFoundStrategy.IGNORE);
+
+        // Collect buildings from relation areas...
+        for (OsmRelation relation : data.getRelations().valueCollection()) {
+            Map<String, String> tags = OsmModelUtil.getTagsAsMap(relation);
+            MultiPolygon area = getPolygon(relation);
+            addAreaToArray(tags, area);
+                try {
+                    wayFinder.findMemberWays(relation, buildingRelationWays);
+                } catch (EntityNotFoundException e) {
+                    // cannot happen (IGNORE strategy)
+                }
+
+        }
+        // ... and also from way areas
+        for (OsmWay way : data.getWays().valueCollection()) {
+            if (buildingRelationWays.contains(way)) {
+                continue;
+            }
+            Map<String, String> tags = OsmModelUtil.getTagsAsMap(way);
+            MultiPolygon area = getPolygon(way);
+            addAreaToArray(tags, area);
+        }
+
+        // Collect streets
+        for (OsmWay way : data.getWays().valueCollection()) {
+            Map<String, String> tags = OsmModelUtil.getTagsAsMap(way);
+
+            String highway = tags.get("highway");
+            if (highway == null) { //skips if not of type highway
+                continue;
+            }
+
+            Collection<LineString> paths = getLine(way);
+
+            switch (highway){ //TODO: Hashmap (?) storage code
+                case "motorway":
+                    //freeway
+                    break;
+                case "trunk":
+                    //limitedaccess
+                    break;
+                case "motorway_link":
+                case "trunk_link":
+                    //intersection
+                    break;
+                case "primary_link":
+                case "secondary_link":
+                case "living_street":
+                case "bus_guideway":
+                case "service":
+                case "unclassified":
+                case "secondary":
+                    //side
+                    break;
+                case "primary":
+                case "raceway":
+                    //main
+                    break;
+                case "tertiary":
+                case "residential":
+                    //minor
+                    break;
+                default:
+                    //TODO: default classification
+            }
+
+            // Okay, this is a valid street
+            for (LineString path : paths) {
+                streets.add(path); //TODO: add street as polygon based on # of lanes? what to do with existing road generation code?
+            }
+
+            // If it has a name, store it for labeling
+            String name = tags.get("name");
+            if (name == null) {
+                continue;
+            }
+            for (LineString path : paths) {
+                names.put(path, name);
+            }
+        }
+
+
+    }
+
+
+    private WayBuilder wayBuilder = new WayBuilder();
+    private RegionBuilder regionBuilder = new RegionBuilder();
+
+    private Collection<LineString> getLine(OsmWay way)
+    {
+        List<LineString> results = new ArrayList<>();
+        try {
+            WayBuilderResult lines = wayBuilder.build(way, data);
+            results.addAll(lines.getLineStrings());
+            if (lines.getLinearRing() != null) {
+                results.add(lines.getLinearRing());
+            }
+        } catch (EntityNotFoundException e) {
+            // ignore
+        }
+        return results;
+    }
+
+    private MultiPolygon getPolygon(OsmWay way)
+    {
+        try {
+            RegionBuilderResult region = regionBuilder.build(way, data);
+            return region.getMultiPolygon();
+        } catch (EntityNotFoundException e) {
+            return null;
+        }
+    }
+
+    private MultiPolygon getPolygon(OsmRelation relation)
+    {
+        try {
+            RegionBuilderResult region = regionBuilder.build(relation, data);
+            return region.getMultiPolygon();
+        } catch (EntityNotFoundException e) {
+            return null;
+        }
+    }
+
+    private void addAreaToArray(Map<String, String> tags, MultiPolygon area){
+        if (area != null)
+        switch (tags.containsKey()){
+            case "building":
+                buildings.add(area);
+                break;
+            case "natural":
+            case "waterway":
+            case "water":
+                water.add(area); //TODO: refine water code after testing
+                break;
+        }
+    }
+
+    private boolean pointWithinPolygons(List<Geometry> array, double lon, double lat){
+        //compute position within polygons of array
+        for (Geometry polygon : array){
+            if(pointWithinBounds(polygon, new Coordinate(lon, lat))) return true;
+        }
+        return false;
+    }
+
+    private boolean pointWithinBounds(Geometry polygon, Coordinate coord){ //pointWithinBounds(path, new Coordinate(lat, lon));
+        Geometry point = new GeometryFactory().createPoint(coord);
+        return polygon.overlaps(point);
+    }
+
+}
+
+//END PROTOCODE
+
 
 public class OpenStreetMaps {
 
@@ -33,9 +291,6 @@ public class OpenStreetMaps {
     private static final String URL_B = ")%20tags%20qt;(._<;);out%20body%20qt;";
     private static final String URL_C = "is_in(";
     private static Thread fallbackCancellerThread;
-
-    public static void main(String[] args) {
-    }
 
     public static String getOverpassEndpoint() {
         return overpassInstance;

@@ -50,12 +50,36 @@ repositories {
         name = "elytradev"
         url = "https://repo.elytradev.com"
     }
+    maven { //contains osm4j
+        name = "topobyte"
+        url = "http://mvn.topobyte.de"
+    }
+    maven { //contains osm4j dependencies
+        name = "slimjars"
+        url = "http://mvn.slimjars.com"
+    }
 }
 
 dependencies {
     deobfProvided "io.github.opencubicchunks:cubicchunks:1.12.2-0.0-SNAPSHOT"
     deobfProvided "io.github.opencubicchunks:cubicworldgen:1.12.2-0.0-SNAPSHOT"
     shade "org.apache.commons:commons-imaging:1.0-alpha1"
+
+    //osm dependencies
+    compile "de.topobyte:osm4j-core:1.1.0"
+    compile "de.topobyte:osm4j-utils:1.1.0"
+    compile "de.topobyte:osm4j-xml:1.1.0"
+    compile "de.topobyte:osm4j-pbf:1.1.1"
+    compile "de.topobyte:osm4j-tbo:1.1.0"
+    compile "de.topobyte:osm4j-geometry:1.1.0"
+
+    compile "de.topobyte:adt-geo:0.0.4"
+    compile "de.topobyte:jts2awt:0.0.1"
+
+    compile "org.wololo:jts2geojson:0.6.0"
+    compile "org.apache.commons:commons-compress:1.8"
+
+    compile "org.locationtech.jts:jts-core:1.17.1"
 }
 
 processResources {
