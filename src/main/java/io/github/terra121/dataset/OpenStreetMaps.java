@@ -10,11 +10,11 @@ import org.apache.commons.io.IOUtils;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.StringWriter;
+import java.lang.reflect.Array;
 import java.net.URL;
 import java.net.URLConnection;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -49,6 +49,8 @@ import de.topobyte.osm4j.geometry.RegionBuilderResult;
 import de.topobyte.osm4j.geometry.WayBuilder;
 import de.topobyte.osm4j.geometry.WayBuilderResult;
 import de.topobyte.osm4j.xml.dynsax.OsmXmlReader;
+
+import javax.management.Attribute;
 
 
 public class OsmData
@@ -287,7 +289,8 @@ public class OpenStreetMaps {
     private static final double NOTHING = 0.01;
 
     private static String overpassInstance = TerraConfig.serverOverpassDefault;
-    private static final String URL_PREFACE = "/?data=[out:json];way(";
+
+    private static final String URL_PREFACE = "/?data=out;way(";
     private static final String URL_B = ")%20tags%20qt;(._<;);out%20body%20qt;";
     private static final String URL_C = "is_in(";
     private static Thread fallbackCancellerThread;
@@ -320,6 +323,16 @@ public class OpenStreetMaps {
     boolean doWater;
     boolean doBuildings;
 
+    private List<Geometry> buildings = new ArrayList<>();
+    private List<Geometry> waters = new ArrayList<>();
+    private List<Geometry> streets = new ArrayList<>();
+    private Map<Geometry, String> names = new HashMap<>();
+    private Map<Geometry, Attributes> attributes = new HashMap<>();
+    private Map<Geometry, Type> types = new HashMap<>();
+    private Map<Geometry, Byte> lanes = new HashMap<>();
+    private Map<Geometry, Byte> layers = new HashMap<>();
+    private InMemoryMapDataSet data;
+
     public OpenStreetMaps(GeographicProjection proj, boolean doRoad, boolean doWater, boolean doBuildings) {
         this.gson = new GsonBuilder().create();
         this.chunks = new LinkedHashMap<>();
@@ -347,6 +360,137 @@ public class OpenStreetMaps {
             this.URL_A += "[!\"water\"][!\"natural\"][!\"waterway\"]";
         }
         this.URL_A += ";out%20geom(";
+    }
+
+    private WayBuilder wayBuilder = new WayBuilder();
+    private RegionBuilder regionBuilder = new RegionBuilder();
+
+    private Collection<LineString> getLine(OsmWay way)
+    {
+        List<LineString> results = new ArrayList<>();
+        try {
+            WayBuilderResult lines = wayBuilder.build(way, data);
+            results.addAll(lines.getLineStrings());
+            if (lines.getLinearRing() != null) {
+                results.add(lines.getLinearRing());
+            }
+        } catch (EntityNotFoundException e) {
+            // ignore
+        }
+        return results;
+    }
+
+    private MultiPolygon getPolygon(OsmWay way)
+    {
+        try {
+            RegionBuilderResult region = regionBuilder.build(way, data);
+            return region.getMultiPolygon();
+        } catch (EntityNotFoundException e) {
+            return null;
+        }
+    }
+
+    private MultiPolygon getPolygon(OsmRelation relation)
+    {
+        try {
+            RegionBuilderResult region = regionBuilder.build(relation, data);
+            return region.getMultiPolygon();
+        } catch (EntityNotFoundException e) {
+            return null;
+        }
+    }
+
+    private boolean addAreaToArray(Map<String, String> tags, MultiPolygon area){
+        if (area != null) {
+            for (String tag : tags.keySet()) {
+                switch (tag) {
+                    case "building": //building areas
+                        if (this.doBuildings)
+                            buildings.add(area);
+                        break;
+                    case "natural": //water areas
+                    case "waterway":
+                    case "water":
+                        if (this.doWater)
+                            waters.add(area); //TODO: refine water code after testing
+                        break;
+                    case "tunnel":
+                    case "bridge": //skip if tunnel or bridge
+                        break;
+                    case "highway": //street areas
+                        if(this.doRoad){
+                            Type type = Type.ROAD;
+                            String name = tags.get("name");
+                            String layerString = tags.get("layers");
+                            String laneString = tags.get("lanes");
+                            Attributes attribute = Attributes.NONE;
+                            byte layersProvided = 1;
+                            byte lanesProvided = 2;
+                            if(tags.get("tunnel") != null) attribute = Attributes.ISTUNNEL;
+                            if(tags.get("bridge") != null) attribute = Attributes.ISBRIDGE;
+                            if(attribute == Attributes.NONE) type = highwayChecker(tags);
+                            if(layerString != null){
+                                layersProvided = Byte.parseByte(layerString);
+                            }
+                            if (laneString != null){
+                                lanesProvided = Byte.parseByte(laneString);
+                            }
+                            streets.add(area); //change streets list to type Geometry since we are dealing with LineStrings and Polygons
+                            if(name != null)
+                            names.put(area, name); //same with names and types maps
+                            types.put(area, type);
+                            lanes.put(area, lanesProvided);//TODO: lanes saved so that we can mark them automatically?
+                            layers.put(area, layersProvided);
+                            attributes.put(area, attribute);
+                        }
+                        break;
+                }
+            }
+            return true;
+        }
+        else {
+            return false;}
+    }
+
+    private Type highwayChecker(Map<String, String> tags){
+        switch (tags.get("highway")){
+            case "motorway":
+                return Type.FREEWAY;
+            case "trunk":
+                return Type.LIMITEDACCESS;
+            case "motorway_link":
+            case "trunk_link":
+                return Type.INTERCHANGE;
+            case "primary_link":
+            case "secondary_link":
+            case "living_street":
+            case "bus_guideway":
+            case "service":
+            case "unclassified":
+            case "secondary":
+                return Type.SIDE;
+            case "primary":
+            case "raceway":
+                return Type.MAIN;
+            case "tertiary":
+            case "residential":
+                return Type.MINOR;
+            default:
+                return Type.ROAD;
+        }
+    }
+
+    private boolean pointWithinPolygons(List<Geometry> array, double lon, double lat){
+        //compute position within polygons of array
+        for (Geometry polygon : array){
+            if(pointWithinBounds(polygon, new Coordinate(lon, lat))) return true;
+        }
+        return false;
+    }
+
+    private boolean pointWithinBounds(Geometry polygon, Coordinate coord){ //pointWithinBounds(path, new Coordinate(lat, lon));
+        Geometry point = new GeometryFactory().createPoint(coord);
+        return polygon.overlaps(point);
     }
 
     public Coord getRegion(double lon, double lat) {
@@ -422,7 +566,6 @@ public class OpenStreetMaps {
 
 
         try {
-
             String bottomleft = Y + "," + X;
             String bbox = bottomleft + ',' + (Y + TILE_SIZE) + ',' + (X + TILE_SIZE);
 
@@ -442,9 +585,13 @@ public class OpenStreetMaps {
             c.addRequestProperty("User-Agent", TerraMod.USERAGENT);
             InputStream is = c.getInputStream();
 
-            this.doGson(is, region);
+            OsmReader reader = new OsmXmlReader(is, false);
+
+            data = MapDataSetLoader.read(reader, true, true, true);
 
             is.close();
+
+            this.buildData(data, region);
 
         } catch (Exception e) {
             TerraMod.LOGGER.error("Osm region download failed, " + e);
@@ -494,56 +641,86 @@ public class OpenStreetMaps {
         return true;
     }
 
-    private void doGson(InputStream is, Region region) throws IOException {
+    private void buildData(InMemoryMapDataSet data, Region region) throws IOException {
+        // We create building geometries from relations and ways. Ways that are
+        // part of multipolygon buildings may be tagged as buildings themselves,
+        // however rendering them independently will fill the polygon holes they
+        // are cutting out of the relations. Hence we store the ways found in
+        // building relations to skip them later on when working on the ways.
+        Set<OsmWay> usedRelationWays = new HashSet<>();
+        // We use this to find all way members of relations.
+        EntityFinder wayFinder = EntityFinders.create(data,
+                EntityNotFoundStrategy.IGNORE);
 
-        StringWriter writer = new StringWriter();
-        IOUtils.copy(is, writer, StandardCharsets.UTF_8);
-        String str = writer.toString();
+        Collection<OsmRelation> relations = data.getRelations().valueCollection();
+        Collection<OsmWay> ways = data.getWays().valueCollection();
 
-        Data data = this.gson.fromJson(str.toString(), Data.class);
+        // Collect buildings from relation areas...
+        // Collect all areas? Yes
+        for (OsmRelation relation : relations) {
+            Map<String, String> tags = OsmModelUtil.getTagsAsMap(relation);
+            MultiPolygon area = getPolygon(relation);
+            addAreaToArray(tags, area); //no need to remove from collection since we are only processing relations once
+            try {
+                wayFinder.findMemberWays(relation, usedRelationWays);
+            } catch (EntityNotFoundException e) {
+                // cannot happen (IGNORE strategy)
+            }
+        }
+        // ... and also from way areas
+        for (OsmWay way : ways) {
+            if (usedRelationWays.contains(way)) {
+                ways.remove(way); //if the relations already sorted contain the way, it is removed from the collection for faster street sorting
+                continue;
+            }
+            Map<String, String> tags = OsmModelUtil.getTagsAsMap(way);
+            MultiPolygon area = getPolygon(way);
+            if (addAreaToArray(tags, area))
+                ways.remove(way); //removes way if it is closed after processing
+        }
 
-        Map<Long, Element> allWays = new HashMap<>();
-        Set<Element> unusedWays = new HashSet<>();
-        Set<Long> ground = new HashSet<>();
-
-        for (Element elem : data.elements) {
+        // Collect streets and rails (non-closed ways)
+        for (OsmWay way : ways) {
             Attributes attributes = Attributes.NONE;
-            if (elem.type == EType.way) {
-                allWays.put(elem.id, elem);
+            Type type = Type.ROAD;
 
-                if (elem.tags == null) {
-                    unusedWays.add(elem);
-                    continue;
-                }
+            Map<String, String> tags = OsmModelUtil.getTagsAsMap(way);
 
-                String naturalv = null;
-                String highway = null;
-                String waterway = null;
-                String building = null;
-                String istunnel = null;
-                String isbridge = null;
+            String highway = tags.get("highway");
+            String istunnel = tags.get("tunnel");
+            // to be implemented
+            String isbridge = tags.get("bridge");
 
-                if (this.doWater) {
-                    naturalv = elem.tags.get("natural");
-                    waterway = elem.tags.get("waterway");
-                }
+            if (!this.doRoad) { //skips if roads are disabled
+                continue;
+            }
 
-                if (this.doRoad) {
-                    highway = elem.tags.get("highway");
-                    istunnel = elem.tags.get("tunnel");
-                    // to be implemented
-                    isbridge = elem.tags.get("bridge");
-                }
+            type = highwayChecker(tags); //get highway type
 
-                if (this.doBuildings) {
-                    building = elem.tags.get("building");
-                }
+            Collection<LineString> paths = getLine(way);
+            // Okay, this is a valid street
+            for (LineString path : paths) {
+                streets.add(path); //TODO: add street as polygon based on # of lanes? what to do with existing road generation code?
+            }
 
-                if (naturalv != null && "coastline".equals(naturalv)) {
-                    this.waterway(elem, -1, region, null);
-                } else if (highway != null || (waterway != null && ("river".equals(waterway) ||
-                                                                    "canal".equals(waterway) || "stream".equals(waterway))) || building != null) { //TODO: fewer equals
+            // If it has a name, store it for labeling
+            String name = tags.get("name");
+            if (name == null) {
+                continue;
+            }
+            for (LineString path : paths) {
+                names.put(path, name);
+                types.put(path, type);
+            }
+        }
 
+        //*
+
+
+
+
+
+                    Attributes attributes = Attributes.NONE;
                     Type type = Type.ROAD;
 
                     if (waterway != null) {
@@ -652,10 +829,11 @@ public class OpenStreetMaps {
                     }
 
                     this.addWay(elem, type, lanes, region, attributes, layer);
-                } else {
-                    unusedWays.add(elem);
-                }
-            } else if (elem.type == EType.relation && elem.members != null && elem.tags != null) {
+
+                 else { //TODO: placeholder code. learn what this is for!
+                    unusedWays.add(elem);}
+
+             else if (elem.type == EType.relation && elem.members != null && elem.tags != null) {
 
                 if (this.doWater) {
                     String naturalv = elem.tags.get("natural");
@@ -691,33 +869,15 @@ public class OpenStreetMaps {
                 ground.add(elem.id);
             }
         }
+*/
 
-        if (this.doWater) {
 
-            for (Element way : unusedWays) {
-                if (way.tags != null) {
-                    String naturalv = way.tags.get("natural");
-                    String waterv = way.tags.get("water");
-                    String wway = way.tags.get("waterway");
 
-                    if (waterv != null || (naturalv != null && "water".equals(naturalv)) || (wway != null && "riverbank".equals(wway))) {
-                        this.waterway(way, way.id + 2400000000L, region, null);
-                    }
-                }
-            }
-
-            if (this.water.grounding.state(region.coord.x, region.coord.y) == 0) {
-                ground.add(-1L);
-            }
-
-            region.renderWater(ground);
-        }
-    }
 
     void addWay(Element elem, Type type, byte lanes, Region region, Attributes attributes, byte layer) {
         double[] lastProj = null;
         if (elem.geometry != null) {
-            for (Geometry geom : elem.geometry) {
+            for (Geom geom : elem.geometry) {
                 if (geom == null) {
                     lastProj = null;
                 } else {
@@ -733,9 +893,9 @@ public class OpenStreetMaps {
         }
     }
 
-    Geometry waterway(Element way, long id, Region region, Geometry last) {
+    Geom waterway(Element way, long id, Region region, Geom last) {
         if (way.geometry != null) {
-            for (Geometry geom : way.geometry) {
+            for (Geom geom : way.geometry) {
                 if (geom != null && last != null) {
                     region.addWaterEdge(last.lon, last.lat, geom.lon, geom.lat, id);
                 }
@@ -925,7 +1085,7 @@ public class OpenStreetMaps {
         String role;
     }
 
-    public static class Geometry {
+    public static class Geom {
         double lat;
         double lon;
     }
@@ -936,7 +1096,7 @@ public class OpenStreetMaps {
         Map<String, String> tags;
         long[] nodes;
         Member[] members;
-        Geometry[] geometry;
+        Geom[] geometry;
     }
 
     public static class Data {

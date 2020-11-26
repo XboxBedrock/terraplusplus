@@ -58,6 +58,14 @@ repositories {
         name = "slimjars"
         url = "http://mvn.slimjars.com"
     }
+    maven {
+        name = "osgeo releases"
+        url = "https://repo.osgeo.org/repository/release/"
+    }
+    maven {
+        name = "osgeo snapshots"
+        url = "https://repo.osgeo.org/repository/snapshot/"
+    }
 }
 
 dependencies {
@@ -80,6 +88,10 @@ dependencies {
     compile "org.apache.commons:commons-compress:1.8"
 
     compile "org.locationtech.jts:jts-core:1.17.1"
+
+    //geotools
+    compile "org.geotools.gt-shapefile:25-SNAPSHOT"
+    compile "org.geotools.gt-swing:25-SNAPSHOT"
 }
 
 processResources {
