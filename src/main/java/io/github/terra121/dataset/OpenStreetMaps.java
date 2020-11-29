@@ -5,15 +5,11 @@ import com.google.gson.GsonBuilder;
 import io.github.terra121.TerraConfig;
 import io.github.terra121.TerraMod;
 import io.github.terra121.projection.GeographicProjection;
-import org.apache.commons.io.IOUtils;
 
 import java.io.IOException;
 import java.io.InputStream;
-import java.io.StringWriter;
-import java.lang.reflect.Array;
 import java.net.URL;
 import java.net.URLConnection;
-import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
@@ -24,16 +20,12 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
-//BEGIN PROTOCODE
-
 import org.locationtech.jts.geom.Coordinate;
 import org.locationtech.jts.geom.Geometry;
 import org.locationtech.jts.geom.GeometryFactory;
 import org.locationtech.jts.geom.LineString;
 import org.locationtech.jts.geom.MultiPolygon;
 
-import de.topobyte.adt.geo.BBox;
-import de.topobyte.osm4j.core.access.OsmInputException;
 import de.topobyte.osm4j.core.access.OsmReader;
 import de.topobyte.osm4j.core.dataset.InMemoryMapDataSet;
 import de.topobyte.osm4j.core.dataset.MapDataSetLoader;
@@ -50,236 +42,6 @@ import de.topobyte.osm4j.geometry.WayBuilder;
 import de.topobyte.osm4j.geometry.WayBuilderResult;
 import de.topobyte.osm4j.xml.dynsax.OsmXmlReader;
 
-import javax.management.Attribute;
-
-
-public class OsmData
-{
-
-    //Query examples:
-    //Check water at 41.2, -87.6: boolean isWater = pointWithinPolygons(water, -87.6, 41.2);
-
-    public OsmData() { //TODO: constructor
-
-    }
-        // This is the region we would like to render
-        BBox bbox = new BBox(13.45546, 52.51229, 13.46642, 52.50761); //TODO: region download and cache
-
-        // Define a query to retrieve some data
-        String queryTemplate = "http://overpass-api.de/api/interpreter?data=(node(%f,%f,%f,%f);<;>;);out;";
-        String query = String.format(queryTemplate, bbox.getLat2(),
-                bbox.getLon1(), bbox.getLat1(), bbox.getLon2());
-
-        // Open a stream
-        InputStream input;
-
-    {
-        try {
-            input = new URL(query).openStream();
-        } catch (IOException e) {
-            e.printStackTrace(); //TODO: log errors
-        }
-    }
-
-    // Create a reader and read all data into a data set
-        OsmReader reader = new OsmXmlReader(input, false);
-        InMemoryMapDataSet data;
-
-    {
-        try {
-            data = MapDataSetLoader.read(reader, true, true,
-                            true);
-        } catch (OsmInputException e) {
-            e.printStackTrace();
-        }
-    }
-    // The data set will be used as entity provider when building geometries
-
-    //TODO: call buildData() in region cache code
-    //buildData();
-
-    // This is a set of values for the 'highway' key of ways that we will render
-    // as streets
-    /*
-    private Set<String> validHighways = new HashSet<>(
-            Arrays.asList("primary", "secondary", "tertiary",
-                    "residential", "living_street"));
-
-    */
-
-
-    // We build the geometries to be rendered during construction and store them
-    // in these fields so that we don't have to recompute everything when
-    // rendering.
-    private List<Geometry> buildings = new ArrayList<>();
-    private List<Geometry> water = new ArrayList<>();
-    private List<LineString> streets = new ArrayList<>();
-    private Map<LineString, String> names = new HashMap<>();
-
-    private void buildData()
-    {
-        // We create building geometries from relations and ways. Ways that are
-        // part of multipolygon buildings may be tagged as buildings themselves,
-        // however rendering them independently will fill the polygon holes they
-        // are cutting out of the relations. Hence we store the ways found in
-        // building relations to skip them later on when working on the ways.
-        Set<OsmWay> buildingRelationWays = new HashSet<>();
-        // We use this to find all way members of relations.
-        EntityFinder wayFinder = EntityFinders.create(data,
-                EntityNotFoundStrategy.IGNORE);
-
-        // Collect buildings from relation areas...
-        for (OsmRelation relation : data.getRelations().valueCollection()) {
-            Map<String, String> tags = OsmModelUtil.getTagsAsMap(relation);
-            MultiPolygon area = getPolygon(relation);
-            addAreaToArray(tags, area);
-                try {
-                    wayFinder.findMemberWays(relation, buildingRelationWays);
-                } catch (EntityNotFoundException e) {
-                    // cannot happen (IGNORE strategy)
-                }
-
-        }
-        // ... and also from way areas
-        for (OsmWay way : data.getWays().valueCollection()) {
-            if (buildingRelationWays.contains(way)) {
-                continue;
-            }
-            Map<String, String> tags = OsmModelUtil.getTagsAsMap(way);
-            MultiPolygon area = getPolygon(way);
-            addAreaToArray(tags, area);
-        }
-
-        // Collect streets
-        for (OsmWay way : data.getWays().valueCollection()) {
-            Map<String, String> tags = OsmModelUtil.getTagsAsMap(way);
-
-            String highway = tags.get("highway");
-            if (highway == null) { //skips if not of type highway
-                continue;
-            }
-
-            Collection<LineString> paths = getLine(way);
-
-            switch (highway){ //TODO: Hashmap (?) storage code
-                case "motorway":
-                    //freeway
-                    break;
-                case "trunk":
-                    //limitedaccess
-                    break;
-                case "motorway_link":
-                case "trunk_link":
-                    //intersection
-                    break;
-                case "primary_link":
-                case "secondary_link":
-                case "living_street":
-                case "bus_guideway":
-                case "service":
-                case "unclassified":
-                case "secondary":
-                    //side
-                    break;
-                case "primary":
-                case "raceway":
-                    //main
-                    break;
-                case "tertiary":
-                case "residential":
-                    //minor
-                    break;
-                default:
-                    //TODO: default classification
-            }
-
-            // Okay, this is a valid street
-            for (LineString path : paths) {
-                streets.add(path); //TODO: add street as polygon based on # of lanes? what to do with existing road generation code?
-            }
-
-            // If it has a name, store it for labeling
-            String name = tags.get("name");
-            if (name == null) {
-                continue;
-            }
-            for (LineString path : paths) {
-                names.put(path, name);
-            }
-        }
-
-
-    }
-
-
-    private WayBuilder wayBuilder = new WayBuilder();
-    private RegionBuilder regionBuilder = new RegionBuilder();
-
-    private Collection<LineString> getLine(OsmWay way)
-    {
-        List<LineString> results = new ArrayList<>();
-        try {
-            WayBuilderResult lines = wayBuilder.build(way, data);
-            results.addAll(lines.getLineStrings());
-            if (lines.getLinearRing() != null) {
-                results.add(lines.getLinearRing());
-            }
-        } catch (EntityNotFoundException e) {
-            // ignore
-        }
-        return results;
-    }
-
-    private MultiPolygon getPolygon(OsmWay way)
-    {
-        try {
-            RegionBuilderResult region = regionBuilder.build(way, data);
-            return region.getMultiPolygon();
-        } catch (EntityNotFoundException e) {
-            return null;
-        }
-    }
-
-    private MultiPolygon getPolygon(OsmRelation relation)
-    {
-        try {
-            RegionBuilderResult region = regionBuilder.build(relation, data);
-            return region.getMultiPolygon();
-        } catch (EntityNotFoundException e) {
-            return null;
-        }
-    }
-
-    private void addAreaToArray(Map<String, String> tags, MultiPolygon area){
-        if (area != null)
-        switch (tags.containsKey()){
-            case "building":
-                buildings.add(area);
-                break;
-            case "natural":
-            case "waterway":
-            case "water":
-                water.add(area); //TODO: refine water code after testing
-                break;
-        }
-    }
-
-    private boolean pointWithinPolygons(List<Geometry> array, double lon, double lat){
-        //compute position within polygons of array
-        for (Geometry polygon : array){
-            if(pointWithinBounds(polygon, new Coordinate(lon, lat))) return true;
-        }
-        return false;
-    }
-
-    private boolean pointWithinBounds(Geometry polygon, Coordinate coord){ //pointWithinBounds(path, new Coordinate(lat, lon));
-        Geometry point = new GeometryFactory().createPoint(coord);
-        return polygon.overlaps(point);
-    }
-
-}
-
-//END PROTOCODE
 
 
 public class OpenStreetMaps {
@@ -323,14 +85,9 @@ public class OpenStreetMaps {
     boolean doWater;
     boolean doBuildings;
 
-    private List<Geometry> buildings = new ArrayList<>();
-    private List<Geometry> waters = new ArrayList<>();
-    private List<Geometry> streets = new ArrayList<>();
-    private Map<Geometry, String> names = new HashMap<>();
-    private Map<Geometry, Attributes> attributes = new HashMap<>();
-    private Map<Geometry, Type> types = new HashMap<>();
-    private Map<Geometry, Byte> lanes = new HashMap<>();
-    private Map<Geometry, Byte> layers = new HashMap<>();
+    private List<BuildingElem> buildings = new ArrayList<>();
+    private List<WaterElem> waters = new ArrayList<>();
+    private List<RoadElem> roads = new ArrayList<>();
     private InMemoryMapDataSet data;
 
     public OpenStreetMaps(GeographicProjection proj, boolean doRoad, boolean doWater, boolean doBuildings) {
@@ -400,86 +157,34 @@ public class OpenStreetMaps {
         }
     }
 
-    private boolean addAreaToArray(Map<String, String> tags, MultiPolygon area){
-        if (area != null) {
-            for (String tag : tags.keySet()) {
-                switch (tag) {
-                    case "building": //building areas
-                        if (this.doBuildings)
-                            buildings.add(area);
-                        break;
-                    case "natural": //water areas
-                    case "waterway":
-                    case "water":
-                        if (this.doWater)
-                            waters.add(area); //TODO: refine water code after testing
-                        break;
-                    case "tunnel":
-                    case "bridge": //skip if tunnel or bridge
-                        break;
-                    case "highway": //street areas
-                        if(this.doRoad){
-                            Type type = Type.ROAD;
-                            String name = tags.get("name");
-                            String layerString = tags.get("layers");
-                            String laneString = tags.get("lanes");
-                            Attributes attribute = Attributes.NONE;
-                            byte layersProvided = 1;
-                            byte lanesProvided = 2;
-                            if(tags.get("tunnel") != null) attribute = Attributes.ISTUNNEL;
-                            if(tags.get("bridge") != null) attribute = Attributes.ISBRIDGE;
-                            if(attribute == Attributes.NONE) type = highwayChecker(tags);
-                            if(layerString != null){
-                                layersProvided = Byte.parseByte(layerString);
-                            }
-                            if (laneString != null){
-                                lanesProvided = Byte.parseByte(laneString);
-                            }
-                            streets.add(area); //change streets list to type Geometry since we are dealing with LineStrings and Polygons
-                            if(name != null)
-                            names.put(area, name); //same with names and types maps
-                            types.put(area, type);
-                            lanes.put(area, lanesProvided);//TODO: lanes saved so that we can mark them automatically?
-                            layers.put(area, layersProvided);
-                            attributes.put(area, attribute);
-                        }
-                        break;
+    private Type typeCheck(Map<String, String> tags){
+        for (String tag : tags.keySet()) {
+            switch (tag) {
+                case "building": //building areas
+                    if (this.doBuildings)
+                        return Type.BUILDING;
+                    break;
+                case "natural": //water areas
+                case "waterway": //TODO: remove type natural and replace with land polygons
+                case "water":
+                    if (this.doWater)
+                        return Type.STREAM; //TODO: refine water code after testing
+                    break;
+                case "tunnel":
+                case "bridge": //skip if tunnel or bridge
+                    break;
+                case "highway": //street areas
+                case "railway":
+                    if(this.doRoad)
+                        return Type.ROAD;
+                    break;
                 }
             }
-            return true;
-        }
-        else {
-            return false;}
+            return Type.IGNORE;
     }
 
-    private Type highwayChecker(Map<String, String> tags){
-        switch (tags.get("highway")){
-            case "motorway":
-                return Type.FREEWAY;
-            case "trunk":
-                return Type.LIMITEDACCESS;
-            case "motorway_link":
-            case "trunk_link":
-                return Type.INTERCHANGE;
-            case "primary_link":
-            case "secondary_link":
-            case "living_street":
-            case "bus_guideway":
-            case "service":
-            case "unclassified":
-            case "secondary":
-                return Type.SIDE;
-            case "primary":
-            case "raceway":
-                return Type.MAIN;
-            case "tertiary":
-            case "residential":
-                return Type.MINOR;
-            default:
-                return Type.ROAD;
-        }
-    }
 
+/*
     private boolean pointWithinPolygons(List<Geometry> array, double lon, double lat){
         //compute position within polygons of array
         for (Geometry polygon : array){
@@ -487,12 +192,7 @@ public class OpenStreetMaps {
         }
         return false;
     }
-
-    private boolean pointWithinBounds(Geometry polygon, Coordinate coord){ //pointWithinBounds(path, new Coordinate(lat, lon));
-        Geometry point = new GeometryFactory().createPoint(coord);
-        return polygon.overlaps(point);
-    }
-
+*/
     public Coord getRegion(double lon, double lat) {
         return new Coord((int) Math.floor(lon / TILE_SIZE), (int) Math.floor(lat / TILE_SIZE));
     }
@@ -655,19 +355,34 @@ public class OpenStreetMaps {
         Collection<OsmRelation> relations = data.getRelations().valueCollection();
         Collection<OsmWay> ways = data.getWays().valueCollection();
 
-        // Collect buildings from relation areas...
-        // Collect all areas? Yes
+        // Collect all areas
         for (OsmRelation relation : relations) {
             Map<String, String> tags = OsmModelUtil.getTagsAsMap(relation);
             MultiPolygon area = getPolygon(relation);
-            addAreaToArray(tags, area); //no need to remove from collection since we are only processing relations once
+            if(area != null){
+                Type type = typeCheck(tags);
+                switch(type){
+                    case BUILDING:
+                        buildings.add(new BuildingElem(area, EType.relation, tags));
+                        break;
+                    case STREAM:
+                        try{
+                        waters.add(new WaterElem(area, EType.relation, tags));} catch(IllegalArgumentException e){
+                            //TerraMod.LOGGER.debug("Illegal argument exception");
+                        }
+                        break;
+                    case ROAD:
+                        roads.add(new RoadElem(area, EType.relation, tags));
+                }
+            }//no need to remove from collection since we are only processing relations once
             try {
                 wayFinder.findMemberWays(relation, usedRelationWays);
             } catch (EntityNotFoundException e) {
                 // cannot happen (IGNORE strategy)
             }
         }
-        // ... and also from way areas
+
+        // ... and also way areas
         for (OsmWay way : ways) {
             if (usedRelationWays.contains(way)) {
                 ways.remove(way); //if the relations already sorted contain the way, it is removed from the collection for faster street sorting
@@ -675,201 +390,60 @@ public class OpenStreetMaps {
             }
             Map<String, String> tags = OsmModelUtil.getTagsAsMap(way);
             MultiPolygon area = getPolygon(way);
-            if (addAreaToArray(tags, area))
+            if(area != null){
+                Type type = typeCheck(tags);
+                switch(type){
+                    case BUILDING:
+                        buildings.add(new BuildingElem(area, EType.area, tags));
+                        break;
+                    case STREAM:
+                        try{
+                            waters.add(new WaterElem(area, EType.area, tags));} catch(IllegalArgumentException e){
+                            //TerraMod.LOGGER.debug("Illegal argument exception");
+                        }
+                        break;
+                    case ROAD:
+                        roads.add(new RoadElem(area, EType.area, tags));
+                }
                 ways.remove(way); //removes way if it is closed after processing
+            }
         }
 
         // Collect streets and rails (non-closed ways)
         for (OsmWay way : ways) {
-            Attributes attributes = Attributes.NONE;
-            Type type = Type.ROAD;
 
             Map<String, String> tags = OsmModelUtil.getTagsAsMap(way);
 
-            String highway = tags.get("highway");
-            String istunnel = tags.get("tunnel");
-            // to be implemented
-            String isbridge = tags.get("bridge");
-
-            if (!this.doRoad) { //skips if roads are disabled
-                continue;
-            }
-
-            type = highwayChecker(tags); //get highway type
-
             Collection<LineString> paths = getLine(way);
             // Okay, this is a valid street
-            for (LineString path : paths) {
-                streets.add(path); //TODO: add street as polygon based on # of lanes? what to do with existing road generation code?
-            }
 
-            // If it has a name, store it for labeling
-            String name = tags.get("name");
-            if (name == null) {
-                continue;
-            }
+            //TODO: add street as polygon based on # of lanes? what to do with existing road generation code?
+
             for (LineString path : paths) {
-                names.put(path, name);
-                types.put(path, type);
+                Type type = typeCheck(tags);
+                switch(type){
+                    case BUILDING:
+                        buildings.add(new BuildingElem(path, EType.way, tags));
+                        break;
+                    case STREAM:
+                        try{
+                            waters.add(new WaterElem(path, EType.way, tags));} catch(IllegalArgumentException e){
+                            //TerraMod.LOGGER.debug("Illegal argument exception");
+                        }
+                        break;
+                    case ROAD:
+                        roads.add(new RoadElem(path, EType.way, tags));
+                    }
             }
         }
+             //TODO: push attributes to generator classes
+             //TODO: add all areas to ground array? or replace with land polygons or water polygons
+             //TODO: create properties of region for lists
+             //region.allRoads = roads;
+             //region.allBuildings = buildings;
+             //region.allWaters = waters;
 
-        //*
-
-
-
-
-
-                    Attributes attributes = Attributes.NONE;
-                    Type type = Type.ROAD;
-
-                    if (waterway != null) {
-                        type = Type.STREAM;
-                        if ("river".equals(waterway) || "canal".equals(waterway)) {
-                            type = Type.RIVER;
-                        }
-
-                    }
-
-                    if (building != null) {
-                        type = Type.BUILDING;
-                    }
-
-                    if (istunnel != null && "yes".equals(istunnel)) {
-
-                        attributes = Attributes.ISTUNNEL;
-
-                    } else if (isbridge != null && "yes".equals(isbridge)) {
-
-                        attributes = Attributes.ISBRIDGE;
-
-                    } else {
-
-                        // totally skip classification if it's a tunnel or bridge. this should make it more efficient.
-                        if (highway != null && attributes == Attributes.NONE) {
-                            switch (highway) {
-                                case "motorway":
-                                    type = Type.FREEWAY;
-                                    break;
-                                case "trunk":
-                                    type = Type.LIMITEDACCESS;
-                                    break;
-                                case "motorway_link":
-                                case "trunk_link":
-                                    type = Type.INTERCHANGE;
-                                    break;
-                                case "secondary":
-                                    type = Type.SIDE;
-                                    break;
-                                case "primary":
-                                case "raceway":
-                                    type = Type.MAIN;
-                                    break;
-                                case "tertiary":
-                                case "residential":
-                                    type = Type.MINOR;
-                                    break;
-                                default:
-                                    if ("primary_link".equals(highway) ||
-                                        "secondary_link".equals(highway) ||
-                                        "living_street".equals(highway) ||
-                                        "bus_guideway".equals(highway) ||
-                                        "service".equals(highway) ||
-                                        "unclassified".equals(highway)) {
-                                        type = Type.SIDE;
-                                    }
-                                    break;
-                            }
-                        }
-                    }
-                    //get lane number (default is 2)
-                    String slanes = elem.tags.get("lanes");
-                    String slayer = elem.tags.get("layers");
-                    byte lanes = 2;
-                    byte layer = 1;
-
-                    if (slayer != null) {
-
-                        try {
-
-                            layer = Byte.parseByte(slayer);
-
-                        } catch (NumberFormatException e) {
-
-                            // default to layer 1 if bad format
-
-                        }
-
-                    }
-
-                    if (slanes != null) {
-
-                        try {
-
-                            lanes = Byte.parseByte(slanes);
-
-                        } catch (NumberFormatException e) {
-
-                        } //default to 2, if bad format
-                    }
-
-                    //prevent super high # of lanes to prevent ridiculous results (prly a mistake if its this high anyways)
-                    if (lanes > 8) {
-                        lanes = 8;
-                    }
-
-                    // an interchange that doesn't have any lane tag should be defaulted to 2 lanes
-                    if (lanes < 2 && type == Type.INTERCHANGE) {
-                        lanes = 2;
-                    }
-
-                    // upgrade road type if many lanes (and the road was important enough to include a lanes tag)
-                    if (lanes > 2 && type == Type.MINOR) {
-                        type = Type.MAIN;
-                    }
-
-                    this.addWay(elem, type, lanes, region, attributes, layer);
-
-                 else { //TODO: placeholder code. learn what this is for!
-                    unusedWays.add(elem);}
-
-             else if (elem.type == EType.relation && elem.members != null && elem.tags != null) {
-
-                if (this.doWater) {
-                    String naturalv = elem.tags.get("natural");
-                    String waterv = elem.tags.get("water");
-                    String wway = elem.tags.get("waterway");
-
-                    if (waterv != null || (naturalv != null && "water".equals(naturalv)) || (wway != null && "riverbank".equals(wway))) {
-                        for (Member member : elem.members) {
-                            if (member.type == EType.way) {
-                                Element way = allWays.get(member.ref);
-                                if (way != null) {
-                                    this.waterway(way, elem.id + 3600000000L, region, null);
-                                    unusedWays.remove(way);
-                                }
-                            }
-                        }
-                        continue;
-                    }
-                }
-                if (this.doBuildings && elem.tags.get("building") != null) {
-                    for (Member member : elem.members) {
-                        if (member.type == EType.way) {
-                            Element way = allWays.get(member.ref);
-                            if (way != null) {
-                                this.addWay(way, Type.BUILDING, (byte) 1, region, Attributes.NONE, (byte) 0);
-                                unusedWays.remove(way);
-                            }
-                        }
-                    }
-                }
-
-            } else if (elem.type == EType.area) {
-                ground.add(elem.id);
-            }
         }
-*/
 
 
 
@@ -1105,4 +679,131 @@ public class OpenStreetMaps {
         Map<String, String> osm3s;
         List<Element> elements;
     }
+
+    public static class Elem {
+        EType etype;
+        Geometry geometry;
+        Map<String, String> tags; //TODO: method to find id
+
+        public Elem(Geometry geometry, EType etype, Map<String, String> tags){
+            this.geometry = geometry;
+            this.etype = etype;
+            this.tags = tags;
+        }
+        public boolean isWithinBounds(double lon, double lat){
+            Geometry point = new GeometryFactory().createPoint(new Coordinate(lon, lat));
+            return this.geometry.overlaps(point);
+        }
+    }
+
+    private static class RoadElem extends Elem{
+        Type type;
+        String name;
+        Attributes attributes;
+        byte lanes;
+        byte layers;
+
+        public RoadElem(Geometry geometry, EType etype, Map<String, String> tags) {
+            super(geometry, etype, tags);
+            //default params
+            name = tags.get("name");
+            attributes = Attributes.NONE;
+            type = Type.ROAD;
+            layers = 1;
+            lanes = 2;
+
+            String layerString = tags.get("layers");
+            String laneString = tags.get("lanes");
+
+            if(tags.get("tunnel") != null) attributes = Attributes.ISTUNNEL;
+            if(tags.get("bridge") != null) attributes = Attributes.ISBRIDGE; //TODO: implement functionality
+
+            if(attributes == Attributes.NONE)
+                switch (tags.get("highway")) {
+                    case "motorway":
+                        type = Type.FREEWAY;
+                    case "trunk":
+                        type = Type.LIMITEDACCESS;
+                    case "motorway_link":
+                    case "trunk_link":
+                        type = Type.INTERCHANGE;
+                    case "primary_link":
+                    case "secondary_link":
+                    case "living_street":
+                    case "bus_guideway":
+                    case "service":
+                    case "unclassified":
+                    case "secondary":
+                        type = Type.SIDE;
+                    case "primary":
+                    case "raceway":
+                        type = Type.MAIN;
+                    case "tertiary":
+                    case "residential":
+                        type = Type.MINOR;
+                    default:
+                        type = Type.ROAD;
+                }
+
+            if(tags.get("railway") != null) type = Type.RAIL; //TODO: check functionality
+
+            if(layerString != null){
+                try{
+                    layers = Byte.parseByte(layerString);} catch (NumberFormatException e){
+                    //TerraMod.LOGGER.debug("Could not find layers in OSM object " + name + ". Defaulting to 1");
+                }
+            }
+            if (laneString != null){
+                try{
+                    lanes = Byte.parseByte(laneString);} catch(NumberFormatException e){
+                    //TerraMod.LOGGER.debug("Could not find lanes in OSM object " + name + ". Defaulting to 2");
+                }
+            }
+            //prevent super high # of lanes to prevent ridiculous results (prly a mistake if its this high anyways)
+            if (lanes > 8)
+                lanes = 8;
+
+            // an interchange that doesn't have any lane tag should be defaulted to 2 lanes
+            if (lanes < 2 && type == Type.INTERCHANGE)
+                lanes = 2;
+
+            // upgrade road type if many lanes (and the road was important enough to include a lanes tag)
+            if (lanes > 2 && type == Type.MINOR)
+                type = Type.MAIN;
+        }
+    }
+
+    private static class WaterElem extends Elem{
+        Type type;
+
+        public WaterElem(Geometry geometry, EType etype, Map<String, String> tags) {
+            super(geometry, etype, tags);
+            String waterTags = tags.get("waterway");
+
+            if("coastline".equals(tags.get("natural")) || "stream".equals(waterTags)) //TODO: create water polygon from coastline LineString
+                type = Type.STREAM;
+            else if ("river".equals(waterTags) || "canal".equals(waterTags))
+                type = Type.RIVER;
+            else throw new IllegalArgumentException(); //Invalid water element. Stop construction
+        }
+    }
+
+    private static class BuildingElem extends Elem{
+        Type type;
+        short height;
+
+        public BuildingElem(Geometry geometry, EType etype, Map<String, String> tags) {
+            super(geometry, etype, tags);
+            type = Type.BUILDING;
+            try{
+            height = Short.parseShort(tags.get("height"));} catch(NumberFormatException e){
+                //TerraMod.LOGGER.debug("Could not find building height in OSM object " + name + ". Defaulting to 2");
+            }
+        }
+    }
+
+    //BuildingElem building = new BuildingElem(null, null, null, null);
+    //Geometry geom = building.geometry;
+    //Type elemtype = building.type;
+
 }
